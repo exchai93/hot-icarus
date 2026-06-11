@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>ICARUS INC.</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;
+            touch-action: none;
+        }
+
+        #game-container {
+            position: relative;
+            aspect-ratio: 9 / 16;
+            height: 95vh;
+            max-width: 100vw;
+            background: #000;
+            border: 2px solid #222;
+            box-shadow: 0 0 0 2px #000, 0 14px 60px rgba(0, 0, 0, 0.65);
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="game-container">
+        <canvas id="gameCanvas" width="256" height="448"></canvas>
+    </div>
+
+    <script>
+        /* =========================================================
+           ICARUS INC. — WORLD TOUR EDITION
+           7 themed levels + secret birthday level, boss fight,
+           dash, combos, power-ups, screen shake, touch controls.
+           Controls: Arrows move/climb, Space shoot, Z dash, Enter start
+        ========================================================= */
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+
+        const WIDTH = 256, HEIGHT = 448;
+        const BUFFER_W = 128, BUFFER_H = 224;
+        const buffer = document.createElement('canvas');
+        buffer.width = BUFFER_W; buffer.height = BUFFER_H;
+        const bctx = buffer.getContext('2d');
+        bctx.imageSmoothingEnabled = false;
+
+        function sx(x) { return (x * (BUFFER_W / WIDTH)) | 0; }
+        function sy(y) { return (y * (BUFFER_H / HEIGHT)) | 0; }
+        function pixRect(x, y, w, h, c) { bctx.fillStyle = c; bctx.fillRect(x | 0, y | 0, w | 0, h | 0); }
+
+        function drawScanlines() {
+            bctx.fillStyle = "rgba(0,0,0,0.12)";
+            for (let y = 0; y < BUFFER_H; y += 2) bctx.fillRect(0, y, BUFFER_W, 1);
+        }
+        function drawVignette() {
+            const g = bctx.createRadialGradient(BUFFER_W / 2, BUFFER_H * 0.45, 10, BUFFER_W / 2, BUFFER_H * 0.45, BUFFER_H * 0.85);
+            g.addColorStop(0, "rgba(0,0,0,0)");
+            g.addColorStop(1, "rgba(0,0,0,0.60)");
+            bctx.fillStyle = g;
+            bctx.fillRect(0, 0, BUFFER_W, BUFFER_H);
+        }
+
+        // ---------------------------------------------------------
+        // THEMES / SCENES
+        const THEMES = [
+            { id: 'ascent', name: 'THE ASCENT', sub: 'DODGE THE FIRESTORM', grad: ['#010006', '#040b21', '#0b2046', '#123b75'], stars: true, lightning: 7000 },
+            { id: 'sea', name: 'OPEN SEA', sub: 'GULLS, GUSTS & GEYSERS', grad: ['#0a1c3a', '#0d3a63', '#0f5e92', '#1287b8'], stars: false },
+            { id: 'desert', name: 'THE DESERT', sub: 'BEWARE THE SANDSTORM', grad: ['#2a0e2e', '#7a2d1d', '#c25a1d', '#e8923a'], stars: false, sandstorm: true },
+            { id: 'lisbon', name: 'LISBON ROOFTOPS', sub: 'MIND THE TRAMS', grad: ['#1b1438', '#4a2a5e', '#b85a6e', '#f0a05a'], stars: false },
+            { id: 'london', name: 'LONDON STORM', sub: 'RAIN & LIGHTNING', grad: ['#05060d', '#0d1220', '#1a2333', '#2a3a4d'], stars: false, rain: true, lightning: 4200 },
+            { id: 'dungeon', name: 'THE DUNGEONS', sub: 'FIND THE LIGHT', grad: ['#0a070f', '#120d18', '#181020', '#1f1428'], stars: false, dark: true },
+            { id: 'core', name: 'THE SOLAR CORE', sub: 'FACE THE GUARDIAN', grad: ['#0d0103', '#2e0708', '#5e1208', '#8c2a0a'], stars: true, boss: true }
+        ];
+        const BDAY = { id: 'bday', name: 'BIRTHDAY BASH', sub: 'A DIRECTOR\'S CUT', grad: ['#160a2e', '#2e1252', '#4d1f78', '#6e2e96'], stars: true, bday: true };
+        const MAX_LEVEL = THEMES.length;
+
+        // ---------------------------------------------------------
+        // GAME STATE
+        const PLAYER_START_Y = 390;
+        const SUN_WIN_LINE = 70;
+
+        let gameState = 'START';
+        let score = 0, level = 1;
+        let birthdayMode = false;
+        let highScore = Number(localStorage.getItem('icarusHighScore')) || 20052;
+        let bdayUnlocked = localStorage.getItem('icarusBdayUnlock') === '1';
+
+        let lastTime = 0, spawnTimer = 0, lightningTimer = 0, sandTimer = 0;
+        let levelIntro = 0, shakeT = 0, shakeMag = 0, wind = 0;
+        let combo = 0, comboTimer = 0;
+        let boss = null, bossShootTimer = 0;
+
+        function theme() { return birthdayMode ? BDAY : THEMES[Math.min(level - 1, THEMES.length - 1)]; }
+
+        const keys = {};
+        window.addEventListener('keydown', e => {
+            keys[e.code] = true;
+            if (gameState !== 'PLAYING') {
+                if (e.code === 'KeyB' && bdayUnlocked && gameState === 'START') {
+                    birthdayMode = true; resetGame(true);
+                } else if (e.code === 'Enter') {
+                    if (birthdayMode && (gameState === 'WIN' || gameState === 'GAMEOVER')) {
+                        birthdayMode = false; gameState = 'START';
+                    } else resetGame(false);
+                }
+            }
+        });
+        window.addEventListener('keyup', e => keys[e.code] = false);
+
+        // Touch controls: left/right thirds move, middle climbs, auto-shoot
+        let touchAuto = false;
+        function handleTouch(e) {
+            e.preventDefault();
+            keys['ArrowLeft'] = keys['ArrowRight'] = keys['ArrowUp'] = false;
+            touchAuto = e.touches.length > 0;
+            for (const t of e.touches) {
+                const r = canvas.getBoundingClientRect();
+                const fx = (t.clientX - r.left) / r.width;
+                if (fx < 0.33) keys['ArrowLeft'] = true;
+                else if (fx > 0.66) keys['ArrowRight'] = true;
+                else keys['ArrowUp'] = true;
+            }
+        }
+        canvas.addEventListener('touchstart', e => {
+            if (gameState !== 'PLAYING') { e.preventDefault(); resetGame(false); return; }
+            handleTouch(e);
+        }, { passive: false });
+        canvas.addEventListener('touchmove', handleTouch, { passive: false });
+        canvas.addEventListener('touchend', handleTouch, { passive: false });
+
+        let player = { x: WIDTH / 2 - 8, y: PLAYER_START_Y, w: 16, h: 16, hp: 5, invuln: 0, shootCooldown: 0, facing: 1, dashT: 0, dashCd: 0, shield: false, tripleT: 0 };
+        let fireballs = [], fallingAsteroids = [], hazards = [], pickups = [], popups = [];
+        let bgAsteroids = [], particles = [], playerTrail = [], projectiles = [], rain = [];
+        let lightningBolt = null;
+
+        let stars = Array.from({ length: 50 }, () => ({
+            x: Math.random() * WIDTH, y: Math.random() * HEIGHT,
+            type: Math.random() > 0.85 ? 'cross' : (Math.random() > 0.5 ? 'cyan' : 'white'),
+            phase: Math.random() * Math.PI * 2, s: Math.random() > 0.75 ? 2 : 1
+        }));
+
+        function initBgAsteroids() {
+            bgAsteroids = Array.from({ length: 6 }, () => ({
+                x: Math.random() * WIDTH, y: Math.random() * HEIGHT,
+                r: 4 + Math.random() * 6, speed: 0.05 + Math.random() * 0.1, seed: Math.random() * 100
+            }));
+        }
+        initBgAsteroids();
+
+        function initRain() {
+            rain = Array.from({ length: 40 }, () => ({ x: Math.random() * WIDTH, y: Math.random() * HEIGHT, v: 4 + Math.random() * 3 }));
+        }
+
+        function spawnExplosion(x, y, color, count) {
+            for (let i = 0; i < count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = 0.4 + Math.random() * 1.6;
+                particles.push({
+                    x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+                    life: 250 + Math.random() * 250, maxLife: 500, color, size: Math.random() > 0.5 ? 2 : 1
+                });
+            }
+        }
+        function spawnConfetti(x, y, count) {
+            const cols = ['#ff5a8c', '#ffd23a', '#5ce1e6', '#9cff5a', '#c98cff'];
+            for (let i = 0; i < count; i++) {
+                particles.push({
+                    x, y, vx: Math.random() * 2 - 1, vy: -1 - Math.random() * 1.5,
+                    life: 600 + Math.random() * 600, maxLife: 1200, grav: 0.04,
+                    color: cols[(Math.random() * cols.length) | 0], size: 1
+                });
+            }
+        }
+
+        function shake(mag, t) { shakeMag = Math.max(shakeMag, mag); shakeT = Math.max(shakeT, t); }
+
+        function addScore(base, x, y) {
+            combo++; comboTimer = 2000;
+            const mult = Math.min(combo, 5);
+            const pts = base * mult;
+            score += pts;
+            popups.push({ x, y, txt: '+' + pts + (mult > 1 ? ' x' + mult : ''), life: 800 });
+        }
+
+        function maybeDropPickup(x, y) {
+            if (Math.random() > 0.12) return;
+            const r = Math.random();
+            const type = r < 0.4 ? 'shield' : (r < 0.75 ? 'triple' : 'heart');
+            pickups.push({ type, x, y, vy: 0.5 });
+        }
+
+        function takeDamage(fx, fy, color) {
+            if (player.invuln > 0) return;
+            if (player.shield) {
+                player.shield = false; player.invuln = 800;
+                spawnExplosion(player.x + 8, player.y + 8, "#5ce1e6", 10);
+                shake(2, 200);
+                return;
+            }
+            player.hp--; player.invuln = 1000;
+            spawnExplosion(fx, fy, color, 12);
+            shake(3, 300);
+            combo = 0;
+            if (player.hp <= 0) {
+                gameState = 'GAMEOVER';
+                shake(5, 500);
+                if (score > highScore) { highScore = score; localStorage.setItem('icarusHighScore', String(highScore)); }
+            }
+        }
+
+        function hit(a, b) {
+            return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+        }
+
+        function resetGame(forceBday) {
+            if (!forceBday) {
+                if (gameState === 'WIN' && !birthdayMode && level < MAX_LEVEL) level++;
+                else if (!(gameState === 'WIN' && !birthdayMode)) { score = 0; level = 1; player.hp = 5; }
+            } else { player.hp = 5; }
+            player.x = WIDTH / 2 - 8; player.y = PLAYER_START_Y;
+            player.invuln = 0; player.shield = false; player.tripleT = 0; player.dashT = 0; player.dashCd = 0;
+            fireballs = []; fallingAsteroids = []; hazards = []; pickups = []; popups = [];
+            particles = []; playerTrail = []; projectiles = []; lightningBolt = null;
+            boss = null; bossShootTimer = 0;
+            spawnTimer = 0; lightningTimer = 0; sandTimer = 0; wind = 0;
+            combo = 0; comboTimer = 0;
+            levelIntro = 2200;
+            const th = theme();
+            if (th.rain) initRain();
+            if (th.boss) boss = { x: WIDTH / 2 - 24, y: 78, w: 48, h: 22, hp: 40, maxHp: 40, t: 0 };
+            gameState = 'PLAYING';
+        }
+
+        function winLevel() {
+            gameState = 'WIN';
+            if (!birthdayMode && level >= 2 && !bdayUnlocked) {
+                bdayUnlocked = true;
+                localStorage.setItem('icarusBdayUnlock', '1');
+            }
+            if (score > highScore) { highScore = score; localStorage.setItem('icarusHighScore', String(highScore)); }
+        }
+
+        // ---------------------------------------------------------
+        // SPAWNING (per theme)
+        function spawnHazards(th, speedMult) {
+            spawnTimer += 16;
+            const interval = th.bday ? 1100 : 900;
+            if (spawnTimer < interval / speedMult) return;
+            spawnTimer = 0;
+            const r = Math.random();
+
+            switch (th.id) {
+                case 'ascent':
+                case 'core':
+                    if (r > 0.4) spawnFireball(speedMult);
+                    else spawnAsteroid(speedMult);
+                    break;
+                case 'sea':
+                    if (r < 0.4) spawnFireball(speedMult);
+                    else if (r < 0.75) spawnBird('gull', speedMult);
+                    else hazards.push({ type: 'spout', x: Math.random() * (WIDTH - 14), w: 14, topY: HEIGHT, rise: 2.2 * speedMult, minTop: 140 + Math.random() * 120, life: 2600 });
+                    break;
+                case 'desert':
+                    if (r < 0.35) spawnFireball(speedMult);
+                    else if (r < 0.7) spawnBird('vulture', speedMult);
+                    else hazards.push({ type: 'tornado', x: Math.random() * (WIDTH - 18), w: 18, topY: 120 + Math.random() * 100, vx: (Math.random() > 0.5 ? 1 : -1) * 0.4 * speedMult, life: 5000, phase: Math.random() * 6 });
+                    break;
+                case 'lisbon':
+                    if (r < 0.3) spawnFireball(speedMult);
+                    else if (r < 0.6) spawnBird('gull', speedMult);
+                    else if (r < 0.85) {
+                        const fromLeft = Math.random() > 0.5;
+                        hazards.push({ type: 'tram', x: fromLeft ? -30 : WIDTH + 4, y: 120 + ((Math.random() * 3) | 0) * 80, w: 28, h: 12, vx: (fromLeft ? 1 : -1) * (1.1 + 0.3 * speedMult) });
+                    } else pickups.push({ type: 'tart', x: Math.random() * (WIDTH - 8), y: 40, vy: 0.6 });
+                    break;
+                case 'london':
+                    if (r < 0.35) spawnFireball(speedMult);
+                    else if (r < 0.65) spawnBird('pigeon', speedMult * 1.2);
+                    else hazards.push({ type: 'umbrella', x: Math.random() * (WIDTH - 12), y: HEIGHT + 10, w: 12, h: 12, vy: 0.8 * speedMult, phase: Math.random() * 6, hp: 1 });
+                    break;
+                case 'dungeon':
+                    if (r < 0.45) hazards.push({ type: 'bat', x: Math.random() * (WIDTH - 10), y: 30, w: 10, h: 8, vy: 0.6 * speedMult, hp: 1, phase: Math.random() * 6 });
+                    else if (r < 0.8) hazards.push({ type: 'stalactite', x: Math.random() * (WIDTH - 8), y: 32, w: 8, h: 12, state: 'hang', timer: 700, vy: 0 });
+                    else spawnAsteroid(speedMult * 0.8);
+                    break;
+                case 'bday':
+                    if (r < 0.4) hazards.push({ type: 'balloon', x: Math.random() * (WIDTH - 10), y: HEIGHT + 10, w: 10, h: 14, vy: 0.7, phase: Math.random() * 6, hp: 1 });
+                    else if (r < 0.6) hazards.push({ type: 'gift', x: Math.random() * (WIDTH - 10), y: 40, w: 10, h: 10, vy: 0.6, hp: 1 });
+                    else if (r < 0.85) spawnFireball(0.8); // falling candles
+                    else pickups.push({ type: 'cake', x: Math.random() * (WIDTH - 8), y: 40, vy: 0.6 });
+                    break;
+            }
+        }
+        function spawnFireball(speedMult) {
+            fireballs.push({ x: Math.random() * (WIDTH - 8), y: 35, w: 8, h: 10, speed: (0.7 + Math.random() * 0.7) * speedMult });
+        }
+        function spawnAsteroid(speedMult) {
+            fallingAsteroids.push({ x: Math.random() * (WIDTH - 12), y: 35, w: 12, h: 12, speed: (0.4 + Math.random() * 0.5) * speedMult, flaming: Math.random() > 0.4, hp: 2, maxHp: 2, seed: Math.random() * 100 });
+        }
+        function spawnBird(kind, speedMult) {
+            const fromLeft = Math.random() > 0.5;
+            hazards.push({
+                type: kind, x: fromLeft ? -12 : WIDTH + 2, baseY: 90 + Math.random() * 220, y: 0, w: 12, h: 8,
+                vx: (fromLeft ? 1 : -1) * (0.7 + Math.random() * 0.5) * speedMult, phase: Math.random() * 6, hp: 1
+            });
+        }
+
+        // ---------------------------------------------------------
+        // UPDATE
+        function update(dt) {
+            if (dt > 50) dt = 50;
+            if (gameState !== 'PLAYING') {
+                for (const s of stars) { s.y += 0.01 * dt; if (s.y > HEIGHT) { s.y = -2; s.x = Math.random() * WIDTH; } }
+                for (const a of bgAsteroids) { a.y += a.speed * (dt / 16); if (a.y > HEIGHT + 20) { a.y = -20; a.x = Math.random() * WIDTH; } }
+                return;
+            }
+
+            const th = theme();
+            const speedMult = th.bday ? 0.9 : 0.5 + (level * 0.2);
+            const gravityMult = 0.8 + (level * 0.1);
+
+            if (levelIntro > 0) levelIntro -= dt;
+            if (shakeT > 0) shakeT -= dt; else shakeMag = 0;
+            if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) combo = 0; }
+            if (player.tripleT > 0) player.tripleT -= dt;
+            if (player.dashCd > 0) player.dashCd -= dt;
+
+            // Movement + dash
+            let moveSpeed = 2.2;
+            if (keys['ArrowLeft']) player.facing = -1;
+            if (keys['ArrowRight']) player.facing = 1;
+            if ((keys['KeyZ'] || keys['ShiftLeft']) && player.dashCd <= 0 && player.dashT <= 0) {
+                player.dashT = 150; player.dashCd = 900;
+                player.invuln = Math.max(player.invuln, 280);
+                spawnExplosion(player.x + 8, player.y + 8, "#5ce1e6", 5);
+            }
+            if (player.dashT > 0) {
+                player.dashT -= dt;
+                player.x += player.facing * 6;
+                playerTrail.push({ x: player.x + 8, y: player.y + 8, life: 200, maxLife: 200 });
+            } else {
+                if (keys['ArrowLeft']) player.x -= moveSpeed;
+                if (keys['ArrowRight']) player.x += moveSpeed;
+            }
+            player.x += wind;
+            player.x = Math.max(0, Math.min(WIDTH - player.w, player.x));
+
+            if (keys['ArrowUp'] && player.y > SUN_WIN_LINE - 10) {
+                player.y -= 0.18;
+                if (Math.random() > 0.3) playerTrail.push({ x: player.x + 8 + (Math.random() * 8 - 4), y: player.y + 15, life: 250, maxLife: 250 });
+            } else if (player.y < PLAYER_START_Y) {
+                player.y += 1.0 * gravityMult;
+            }
+
+            // Win check (boss blocks the sun)
+            if (player.y <= SUN_WIN_LINE) {
+                if (boss) player.y = SUN_WIN_LINE + 1;
+                else winLevel();
+                if (gameState !== 'PLAYING') return;
+            }
+
+            // Shooting
+            if (player.shootCooldown > 0) player.shootCooldown -= dt;
+            if ((keys['Space'] || touchAuto) && player.shootCooldown <= 0) {
+                projectiles.push({ x: player.x + 7, y: player.y - 4, w: 2, h: 6, vx: 0 });
+                if (player.tripleT > 0) {
+                    projectiles.push({ x: player.x + 3, y: player.y - 2, w: 2, h: 6, vx: -0.8 });
+                    projectiles.push({ x: player.x + 11, y: player.y - 2, w: 2, h: 6, vx: 0.8 });
+                }
+                player.shootCooldown = 250;
+            }
+            if (player.invuln > 0) player.invuln -= dt;
+
+            // Sandstorm (desert)
+            wind = 0;
+            if (th.sandstorm) {
+                sandTimer += dt;
+                const cycle = sandTimer % 9000;
+                if (cycle > 6500) wind = (Math.floor(sandTimer / 9000) % 2 === 0 ? 1 : -1) * 0.9;
+            }
+
+            // Lightning
+            if (th.lightning) {
+                lightningTimer += dt;
+                if (!lightningBolt && lightningTimer > (th.lightning / speedMult)) {
+                    lightningBolt = { targetX: Math.random() * WIDTH, timer: 900, active: false, points: [] };
+                }
+                if (lightningBolt) {
+                    lightningBolt.timer -= dt;
+                    if (lightningBolt.timer <= 0 && !lightningBolt.active) {
+                        lightningBolt.active = true; lightningBolt.timer = 300;
+                        let px = WIDTH / 2, py = 10;
+                        lightningBolt.points = [{ x: px, y: py }];
+                        for (let i = 1; i <= 8; i++) {
+                            px += (lightningBolt.targetX - px) / (9 - i) + (Math.random() * 40 - 20);
+                            py += HEIGHT / 8;
+                            lightningBolt.points.push({ x: px, y: py });
+                        }
+                        shake(2, 150);
+                    } else if (lightningBolt.timer <= 0 && lightningBolt.active) {
+                        lightningBolt = null; lightningTimer = 0;
+                    }
+                    if (lightningBolt && lightningBolt.active && player.invuln <= 0) {
+                        for (const p of lightningBolt.points) {
+                            if (Math.abs(player.x + 8 - p.x) < 14 && Math.abs(player.y + 8 - p.y) < 16) {
+                                player.y = PLAYER_START_Y;
+                                takeDamage(player.x + 8, player.y + 8, "#ffffff");
+                                lightningBolt = null;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            spawnHazards(th, speedMult);
+
+            // Boss
+            if (boss) {
+                boss.t += dt;
+                boss.x = WIDTH / 2 - 24 + Math.sin(boss.t * 0.0012) * 60;
+                bossShootTimer += dt;
+                if (bossShootTimer > 1500 / speedMult) {
+                    bossShootTimer = 0;
+                    for (let i = -1; i <= 1; i++) {
+                        fireballs.push({ x: boss.x + 22 + i * 4, y: boss.y + 20, w: 8, h: 10, speed: 1.2 * speedMult, vx: i * 0.5 });
+                    }
+                }
+                if (player.invuln <= 0 && hit(player, boss)) takeDamage(player.x + 8, player.y, "#ff7a24");
+            }
+
+            // Projectiles
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                p.y -= 5; p.x += p.vx;
+                if (p.y < 0 || p.x < -4 || p.x > WIDTH + 4) { projectiles.splice(i, 1); continue; }
+                if (boss && hit(p, boss)) {
+                    boss.hp--;
+                    spawnExplosion(p.x, p.y, "#ffe685", 4);
+                    projectiles.splice(i, 1);
+                    score += 5;
+                    if (boss.hp <= 0) {
+                        spawnExplosion(boss.x + 24, boss.y + 11, "#ff7a24", 40);
+                        spawnExplosion(boss.x + 24, boss.y + 11, "#ffe685", 30);
+                        addScore(500, boss.x + 24, boss.y + 11);
+                        shake(5, 600);
+                        boss = null;
+                    }
+                }
+            }
+
+            // Fireballs
+            for (let i = fireballs.length - 1; i >= 0; i--) {
+                const f = fireballs[i];
+                f.y += f.speed; if (f.vx) f.x += f.vx;
+                if (player.invuln <= 0 && hit(player, f)) {
+                    takeDamage(f.x + 4, f.y + 5, "#ff5a1c");
+                    fireballs.splice(i, 1); continue;
+                }
+                let dead = false;
+                for (let pi = projectiles.length - 1; pi >= 0; pi--) {
+                    if (hit(projectiles[pi], f)) {
+                        addScore(10, f.x, f.y);
+                        spawnExplosion(f.x + 4, f.y + 5, "#ff7a24", 8);
+                        maybeDropPickup(f.x, f.y);
+                        fireballs.splice(i, 1); projectiles.splice(pi, 1);
+                        dead = true; break;
+                    }
+                }
+                if (!dead && f.y > HEIGHT) fireballs.splice(i, 1);
+            }
+
+            // Asteroids
+            for (let i = fallingAsteroids.length - 1; i >= 0; i--) {
+                const a = fallingAsteroids[i];
+                a.y += a.speed;
+                if (player.invuln <= 0 && hit(player, a)) {
+                    takeDamage(a.x + 6, a.y + 6, a.flaming ? "#ff4b1a" : "#5a4d41");
+                    fallingAsteroids.splice(i, 1); continue;
+                }
+                let dead = false;
+                for (let pi = projectiles.length - 1; pi >= 0; pi--) {
+                    if (hit(projectiles[pi], a)) {
+                        a.hp--; projectiles.splice(pi, 1);
+                        spawnExplosion(a.x + 6, a.y + 6, "#ffe685", 4);
+                        if (a.hp <= 0) {
+                            addScore(20, a.x, a.y);
+                            spawnExplosion(a.x + 6, a.y + 6, a.flaming ? "#ff7a24" : "#5a4d41", 12);
+                            maybeDropPickup(a.x, a.y);
+                            fallingAsteroids.splice(i, 1);
+                            dead = true;
+                        }
+                        break;
+                    }
+                }
+                if (!dead && a.y > HEIGHT) fallingAsteroids.splice(i, 1);
+            }
+
+            // Themed hazards
+            for (let i = hazards.length - 1; i >= 0; i--) {
+                const h = hazards[i];
+                let remove = false, touchable = true, shootable = false, pts = 15, col = "#cccccc";
+                switch (h.type) {
+                    case 'gull': case 'vulture': case 'pigeon':
+                        h.x += h.vx;
+                        h.y = h.baseY + Math.sin(Date.now() * 0.004 + h.phase) * 14;
+                        if (h.x < -16 || h.x > WIDTH + 16) remove = true;
+                        shootable = true; pts = 15;
+                        col = h.type === 'vulture' ? "#6b4a2e" : "#dddddd";
+                        break;
+                    case 'tram':
+                        h.x += h.vx;
+                        if (h.x < -34 || h.x > WIDTH + 34) remove = true;
+                        col = "#ffd23a";
+                        break;
+                    case 'spout':
+                        if (h.topY > h.minTop) h.topY -= h.rise;
+                        h.life -= dt;
+                        if (h.life <= 0) remove = true;
+                        touchable = false;
+                        if (player.invuln <= 0 && player.x + 14 > h.x && player.x + 2 < h.x + h.w && player.y + player.h > h.topY) {
+                            takeDamage(player.x + 8, player.y + 8, "#7df9ff");
+                        }
+                        break;
+                    case 'tornado':
+                        h.x += h.vx + Math.sin(Date.now() * 0.003 + h.phase) * 0.4;
+                        h.life -= dt;
+                        if (h.life <= 0 || h.x < -20 || h.x > WIDTH + 20) remove = true;
+                        touchable = false;
+                        if (player.invuln <= 0 && player.x + 14 > h.x && player.x + 2 < h.x + h.w && player.y + player.h > h.topY) {
+                            takeDamage(player.x + 8, player.y + 8, "#d2a35a");
+                        }
+                        break;
+                    case 'umbrella':
+                        h.y -= h.vy;
+                        h.x += Math.sin(Date.now() * 0.003 + h.phase) * 0.5;
+                        if (h.y < -16) remove = true;
+                        shootable = true; pts = 20; col = "#2a3a8c";
+                        break;
+                    case 'bat':
+                        h.y += h.vy;
+                        h.x += Math.max(-0.8, Math.min(0.8, (player.x - h.x) * 0.01)) + Math.sin(Date.now() * 0.008 + h.phase) * 0.6;
+                        if (h.y > HEIGHT) remove = true;
+                        shootable = true; pts = 25; col = "#5a3a78";
+                        break;
+                    case 'stalactite':
+                        if (h.state === 'hang') {
+                            h.timer -= dt;
+                            if (h.timer <= 0) h.state = 'fall';
+                            touchable = false;
+                        } else {
+                            h.vy = Math.min(6, h.vy + 0.25);
+                            h.y += h.vy;
+                            if (h.y > HEIGHT) remove = true;
+                        }
+                        col = "#9a8fa8";
+                        break;
+                    case 'balloon':
+                        h.y -= h.vy;
+                        h.x += Math.sin(Date.now() * 0.002 + h.phase) * 0.4;
+                        if (h.y < -18) remove = true;
+                        shootable = true; touchable = false; pts = 25; col = "#ff5a8c";
+                        break;
+                    case 'gift':
+                        h.y += h.vy;
+                        if (h.y > HEIGHT) remove = true;
+                        shootable = true; touchable = false; pts = 10; col = "#ffd23a";
+                        break;
+                }
+                if (remove) { hazards.splice(i, 1); continue; }
+                if (touchable && player.invuln <= 0 && hit(player, h)) {
+                    takeDamage(h.x + h.w / 2, h.y + h.h / 2, col);
+                    hazards.splice(i, 1); continue;
+                }
+                if (shootable) {
+                    for (let pi = projectiles.length - 1; pi >= 0; pi--) {
+                        if (hit(projectiles[pi], h)) {
+                            projectiles.splice(pi, 1);
+                            addScore(pts, h.x, h.y);
+                            if (h.type === 'balloon') spawnConfetti(h.x + 5, h.y + 5, 14);
+                            else spawnExplosion(h.x + h.w / 2, h.y + h.h / 2, col, 8);
+                            if (h.type === 'gift') {
+                                const r = Math.random();
+                                pickups.push({ type: r < 0.4 ? 'shield' : (r < 0.75 ? 'triple' : 'heart'), x: h.x, y: h.y, vy: 0.5 });
+                                spawnConfetti(h.x + 5, h.y + 5, 10);
+                            }
+                            hazards.splice(i, 1);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Pickups
+            for (let i = pickups.length - 1; i >= 0; i--) {
+                const p = pickups[i];
+                p.y += p.vy;
+                if (p.y > HEIGHT) { pickups.splice(i, 1); continue; }
+                if (hit(player, { x: p.x, y: p.y, w: 10, h: 10 })) {
+                    switch (p.type) {
+                        case 'shield': player.shield = true; popups.push({ x: p.x, y: p.y, txt: 'SHIELD', life: 800 }); break;
+                        case 'triple': player.tripleT = 8000; popups.push({ x: p.x, y: p.y, txt: 'TRIPLE', life: 800 }); break;
+                        case 'heart': player.hp = Math.min(5, player.hp + 1); popups.push({ x: p.x, y: p.y, txt: '+HP', life: 800 }); break;
+                        case 'tart': player.hp = Math.min(5, player.hp + 1); addScore(50, p.x, p.y); break;
+                        case 'cake': addScore(100, p.x, p.y); spawnConfetti(p.x + 5, p.y + 5, 12); break;
+                    }
+                    spawnExplosion(p.x + 5, p.y + 5, "#5ce1e6", 6);
+                    pickups.splice(i, 1);
+                }
+            }
+
+            // Ambience
+            for (const s of stars) {
+                s.y += 0.01 * dt * (0.5 + level * 0.03);
+                if (s.y > HEIGHT) { s.y = -2; s.x = Math.random() * WIDTH; }
+            }
+            for (const a of bgAsteroids) {
+                a.y += a.speed * (dt / 16) * (0.7 + level * 0.05);
+                if (a.y > HEIGHT + 20) { a.y = -20; a.x = Math.random() * WIDTH; }
+            }
+            if (th.rain) {
+                for (const r of rain) {
+                    r.y += r.v; r.x -= 1;
+                    if (r.y > HEIGHT) { r.y = -4; r.x = Math.random() * (WIDTH + 40); }
+                }
+            }
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx * (dt / 16); p.y += p.vy * (dt / 16);
+                if (p.grav) p.vy += p.grav * (dt / 16);
+                p.life -= dt;
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+            for (let i = playerTrail.length - 1; i >= 0; i--) {
+                const t = playerTrail[i];
+                t.y += 0.5 * (dt / 16); t.life -= dt;
+                if (t.life <= 0) playerTrail.splice(i, 1);
+            }
+            for (let i = popups.length - 1; i >= 0; i--) {
+                popups[i].y -= 0.4; popups[i].life -= dt;
+                if (popups[i].life <= 0) popups.splice(i, 1);
+            }
+        }
+
+        // ---------------------------------------------------------
+        // DRAW HELPERS
+        function drawPixelHeart(x, y) {
+            pixRect(x + 1, y, 1, 1, "#ff2a1f"); pixRect(x + 3, y, 1, 1, "#ff2a1f");
+            pixRect(x, y + 1, 5, 1, "#ff2a1f"); pixRect(x + 1, y + 2, 3, 1, "#ff2a1f");
+            pixRect(x + 2, y + 3, 1, 1, "#ff2a1f");
+        }
+
+        function drawOverlay(t, lines) {
+            const h = 36 + lines.length * 10;
+            bctx.fillStyle = "rgba(0,0,0,0.85)";
+            bctx.fillRect(8, 86, BUFFER_W - 16, h);
+            bctx.strokeStyle = "#ffb23a"; bctx.lineWidth = 1;
+            bctx.strokeRect(9, 87, BUFFER_W - 18, h - 2);
+            bctx.fillStyle = "#fff"; bctx.textAlign = "center"; bctx.font = "8px monospace";
+            bctx.fillText(t, BUFFER_W / 2, 102);
+            bctx.font = "6px monospace";
+            lines.forEach((l, i) => {
+                bctx.fillStyle = i % 2 === 0 ? "#ffb23a" : "#9cf";
+                bctx.fillText(l, BUFFER_W / 2, 116 + i * 10);
+            });
+        }
+
+        function drawRock(x, y, r, seed, hpRatio = 1.0) {
+            const points = [], segments = 8;
+            for (let i = 0; i < segments; i++) {
+                const a = (i / segments) * Math.PI * 2;
+                const offset = (Math.sin(a * 4 + seed) * 0.15) * r;
+                points.push({ x: x + Math.cos(a) * (r + offset), y: y + Math.sin(a) * (r + offset) });
+            }
+            bctx.fillStyle = "#5a4d41";
+            bctx.beginPath();
+            bctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < segments; i++) bctx.lineTo(points[i].x, points[i].y);
+            bctx.closePath(); bctx.fill();
+            bctx.fillStyle = "#827161";
+            bctx.beginPath();
+            bctx.moveTo(x, y);
+            for (const i of [5, 6, 7, 0]) bctx.lineTo(points[i].x, points[i].y);
+            bctx.closePath(); bctx.fill();
+            bctx.fillStyle = "#3d332a";
+            bctx.fillRect((x + r * 0.2) | 0, (y + r * 0.2) | 0, 1, 1);
+            if (hpRatio < 1.0) {
+                pixRect(x - 2, y, 4, 1, "#1e1514");
+                pixRect(x, y - 2, 1, 4, "#1e1514");
+            }
+        }
+
+        function drawSun(coreColor, haloA, haloB) {
+            const sunX = (BUFFER_W / 2) | 0, sunY = 22;
+            for (let r = 70; r >= 34; r -= 3) {
+                bctx.globalAlpha = 0.03 + (70 - r) * 0.008;
+                bctx.fillStyle = (r % 6 === 0) ? haloB : haloA;
+                bctx.beginPath(); bctx.arc(sunX, sunY, r, 0, Math.PI * 2); bctx.fill();
+            }
+            bctx.globalAlpha = 0.15; bctx.fillStyle = haloA;
+            bctx.beginPath(); bctx.arc(sunX, sunY, 32, 0, Math.PI * 2); bctx.fill();
+            bctx.globalAlpha = 1.0; bctx.fillStyle = coreColor;
+            bctx.beginPath(); bctx.arc(sunX, sunY, 25, 0, Math.PI * 2); bctx.fill();
+            bctx.fillStyle = "rgba(255,235,140,0.15)";
+            bctx.fillRect(sunX - 3, 0, 6, BUFFER_H * 0.55);
+            bctx.fillStyle = "rgba(255,255,255,0.40)";
+            bctx.fillRect(sunX - 1, 0, 2, BUFFER_H * 0.55);
+        }
+
+        function drawCakeSun(t) {
+            const cx = (BUFFER_W / 2) | 0;
+            bctx.globalAlpha = 0.2; bctx.fillStyle = "#ff8cc6";
+            bctx.beginPath(); bctx.arc(cx, 24, 34, 0, Math.PI * 2); bctx.fill();
+            bctx.globalAlpha = 1.0;
+            pixRect(cx - 22, 26, 44, 12, "#a8552e"); // base layer
+            pixRect(cx - 16, 17, 32, 9, "#e88aa8");  // mid layer
+            pixRect(cx - 10, 10, 20, 7, "#fff0c8");  // top layer
+            for (let i = 0; i < 5; i++) {
+                const fx = cx - 18 + i * 9;
+                pixRect(fx, 28, 3, 2, "#ffffff");    // icing drips
+            }
+            for (let i = 0; i < 3; i++) {
+                const candX = cx - 6 + i * 6;
+                pixRect(candX, 5, 1, 5, "#7df9ff");
+                const flick = Math.sin(t * 0.02 + i * 2) > 0 ? 0 : 1;
+                pixRect(candX, 3 + flick, 1, 2, "#ffd23a");
+            }
+        }
+
+        function drawPhoenix(t) {
+            const wy = 19 + Math.sin(t * 0.0015) * 1.5;
+            const rows = [
+                [58, 0, 4, "#9e5f00"], [52, -1, 6, "#b87000"], [46, -3, 6, "#cf8100"],
+                [38, -5, 8, "#e69c24"], [30, -7, 8, "#fcd256"], [20, -9, 10, "#fff39c"], [12, -11, 8, "#ffffff"]
+            ];
+            for (const [x, dy, w, c] of rows) {
+                pixRect(x, wy + dy, w, 2, c);
+                pixRect(126 - x - w, wy + dy, w, 2, c);
+            }
+            pixRect(54, wy + 2, 8, 2, "#704000"); pixRect(66, wy + 2, 8, 2, "#704000");
+            pixRect(44, wy, 10, 2, "#4d2800"); pixRect(74, wy, 10, 2, "#4d2800");
+            pixRect(63, wy - 5, 2, 2, "#8f5300");
+            pixRect(62, wy - 3, 4, 8, "#704000");
+            pixRect(63, wy + 5, 2, 6, "#b87000");
+        }
+
+        // ---------------------------------------------------------
+        // THEMED BACKGROUNDS
+        function drawThemeBg(th, t) {
+            const bg = bctx.createLinearGradient(0, 0, 0, BUFFER_H);
+            bg.addColorStop(0, th.grad[0]); bg.addColorStop(0.4, th.grad[1]);
+            bg.addColorStop(0.75, th.grad[2]); bg.addColorStop(1, th.grad[3]);
+            bctx.fillStyle = bg;
+            bctx.fillRect(0, 0, BUFFER_W, BUFFER_H);
+
+            if (th.stars) {
+                for (const s of stars) {
+                    if (Math.sin(t * 0.003 + s.phase) <= -0.2) continue;
+                    const X = sx(s.x), Y = sy(s.y);
+                    if (s.type === 'cross') {
+                        pixRect(X, Y, 1, 1, "#ffffff");
+                        pixRect(X - 1, Y, 1, 1, "#7df9ff"); pixRect(X + 1, Y, 1, 1, "#7df9ff");
+                        pixRect(X, Y - 1, 1, 1, "#7df9ff"); pixRect(X, Y + 1, 1, 1, "#7df9ff");
+                    } else if (s.type === 'cyan') pixRect(X, Y, 1, 1, "#9bf0ff");
+                    else pixRect(X, Y, s.s, s.s, "#ffffff");
+                }
+            }
+
+            switch (th.id) {
+                case 'ascent': {
+                    bctx.globalAlpha = 0.15;
+                    let g1 = bctx.createRadialGradient(25, 60, 5, 25, 60, 45);
+                    g1.addColorStop(0, "#51125e"); g1.addColorStop(1, "rgba(81,18,94,0)");
+                    bctx.fillStyle = g1; bctx.fillRect(0, 0, BUFFER_W, BUFFER_H);
+                    let g2 = bctx.createRadialGradient(100, 150, 10, 100, 150, 60);
+                    g2.addColorStop(0, "#0a4b91"); g2.addColorStop(1, "rgba(10,75,145,0)");
+                    bctx.fillStyle = g2; bctx.fillRect(0, 0, BUFFER_W, BUFFER_H);
+                    bctx.globalAlpha = 0.45;
+                    for (const a of bgAsteroids) drawRock(sx(a.x), sy(a.y), a.r, a.seed);
+                    bctx.globalAlpha = 1.0;
+                    drawSun("#ffffff", "#ffb23a", "#ff4b1a");
+                    drawPhoenix(t);
+                    break;
+                }
+                case 'sea': {
+                    drawSun("#fff8e0", "#ffd86e", "#ff9a3a");
+                    // clouds
+                    bctx.globalAlpha = 0.35;
+                    pixRect(14 + Math.sin(t * 0.0004) * 6, 58, 26, 5, "#cfe8f5");
+                    pixRect(80 + Math.sin(t * 0.0005 + 2) * 8, 92, 30, 5, "#cfe8f5");
+                    bctx.globalAlpha = 1.0;
+                    // sea
+                    pixRect(0, BUFFER_H - 26, BUFFER_W, 26, "#0a3a66");
+                    for (let row = 0; row < 4; row++) {
+                        const yy = BUFFER_H - 24 + row * 6;
+                        for (let xx = 0; xx < BUFFER_W; xx += 8) {
+                            const off = (Math.sin(t * 0.002 + xx * 0.2 + row) * 2) | 0;
+                            pixRect(xx + off, yy, 4, 1, row % 2 === 0 ? "#5ce1e6" : "#2a7ab0");
+                        }
+                    }
+                    // bobbing boat
+                    const bob = (Math.sin(t * 0.0015) * 2) | 0;
+                    pixRect(16, BUFFER_H - 30 + bob, 18, 4, "#6b4226");
+                    pixRect(20, BUFFER_H - 33 + bob, 10, 3, "#8a5a35");
+                    pixRect(24, BUFFER_H - 44 + bob, 1, 11, "#3d2a18");
+                    pixRect(25, BUFFER_H - 43 + bob, 7, 6, "#e8e0c8");
+                    break;
+                }
+                case 'desert': {
+                    drawSun("#fff0d0", "#ff9a3a", "#e8501e");
+                    // dunes
+                    for (let layer = 0; layer < 2; layer++) {
+                        bctx.fillStyle = layer === 0 ? "#a16a2a" : "#c2873b";
+                        bctx.beginPath();
+                        bctx.moveTo(0, BUFFER_H);
+                        for (let xx = 0; xx <= BUFFER_W; xx += 8) {
+                            bctx.lineTo(xx, BUFFER_H - 18 - layer * 8 + Math.sin(xx * 0.06 + layer * 3) * 6);
+                        }
+                        bctx.lineTo(BUFFER_W, BUFFER_H);
+                        bctx.closePath(); bctx.fill();
+                    }
+                    // cacti
+                    pixRect(20, BUFFER_H - 30, 3, 14, "#2e6b2e");
+                    pixRect(17, BUFFER_H - 26, 3, 2, "#2e6b2e"); pixRect(17, BUFFER_H - 30, 2, 5, "#2e6b2e");
+                    pixRect(98, BUFFER_H - 24, 3, 10, "#2e6b2e");
+                    break;
+                }
+                case 'lisbon': {
+                    drawSun("#fff4d8", "#ffc26e", "#e87a3a");
+                    // rooftops & azulejo facades
+                    const builds = [[0, 150, 26, '#d8c8a8'], [28, 138, 22, '#a8c8d8'], [52, 156, 24, '#e8d0b0'], [78, 142, 26, '#c8a8b8'], [106, 152, 22, '#d8b890']];
+                    for (const [bx, by, bw, c] of builds) {
+                        pixRect(bx, by, bw, BUFFER_H - by, c);
+                        pixRect(bx - 1, by - 4, bw + 2, 4, "#b04a2a"); // terracotta roof
+                        for (let wy2 = by + 8; wy2 < BUFFER_H - 6; wy2 += 12)
+                            for (let wx = bx + 3; wx < bx + bw - 3; wx += 8)
+                                pixRect(wx, wy2, 3, 5, "#3a2a4a");
+                        // azulejo tile band
+                        for (let tx = bx; tx < bx + bw; tx += 2)
+                            pixRect(tx, by + 2, 1, 1, (tx / 2) % 2 === 0 ? "#2a6ab0" : "#e8f0f8");
+                    }
+                    break;
+                }
+                case 'london': {
+                    // moon
+                    bctx.globalAlpha = 0.9; bctx.fillStyle = "#e8e8d8";
+                    bctx.beginPath(); bctx.arc(BUFFER_W / 2, 22, 14, 0, Math.PI * 2); bctx.fill();
+                    bctx.globalAlpha = 1.0;
+                    // skyline + Big Ben
+                    pixRect(0, 180, BUFFER_W, 44, "#0a0d14");
+                    pixRect(8, 168, 16, 56, "#0d1018"); pixRect(40, 174, 20, 50, "#0d1018"); pixRect(100, 170, 18, 54, "#0d1018");
+                    pixRect(68, 140, 12, 84, "#141826"); // tower
+                    pixRect(66, 134, 16, 8, "#1a2030");
+                    pixRect(71, 128, 6, 6, "#1a2030"); pixRect(73, 122, 2, 6, "#1a2030"); // spire
+                    bctx.fillStyle = "#ffe9a8";
+                    bctx.beginPath(); bctx.arc(74, 145, 4, 0, Math.PI * 2); bctx.fill(); // clock
+                    pixRect(74, 142, 1, 3, "#141826"); pixRect(74, 145, 2, 1, "#141826");
+                    // window lights
+                    for (let i = 0; i < 8; i++) pixRect(10 + (i * 13) % 110, 184 + (i * 7) % 30, 2, 2, "#ffd86e");
+                    // fog band
+                    bctx.globalAlpha = 0.18; pixRect(0, 150 + Math.sin(t * 0.0006) * 6, BUFFER_W, 22, "#aab8c8");
+                    bctx.globalAlpha = 1.0;
+                    break;
+                }
+                case 'dungeon': {
+                    // brick walls
+                    bctx.globalAlpha = 0.5;
+                    for (let yy = 0; yy < BUFFER_H; yy += 8)
+                        for (let xx = (yy / 8) % 2 === 0 ? 0 : 6; xx < BUFFER_W; xx += 12)
+                            pixRect(xx, yy, 11, 7, (xx + yy) % 24 === 0 ? "#241a30" : "#1c1426");
+                    bctx.globalAlpha = 1.0;
+                    pixRect(0, 0, 8, BUFFER_H, "#120c1a"); pixRect(BUFFER_W - 8, 0, 8, BUFFER_H, "#120c1a");
+                    // glowing exit portal where the sun would be
+                    const px2 = BUFFER_W / 2;
+                    for (let r = 30; r >= 14; r -= 4) {
+                        bctx.globalAlpha = 0.06 + (30 - r) * 0.012;
+                        bctx.fillStyle = "#5ce1e6";
+                        bctx.beginPath(); bctx.arc(px2, 22, r, 0, Math.PI * 2); bctx.fill();
+                    }
+                    bctx.globalAlpha = 1.0; bctx.fillStyle = "#cffcff";
+                    bctx.beginPath(); bctx.arc(px2, 22, 12, 0, Math.PI * 2); bctx.fill();
+                    // torches
+                    for (const [tx, ty] of [[12, 80], [112, 140], [12, 180]]) {
+                        pixRect(tx, ty, 2, 6, "#5a3a20");
+                        const fl = Math.sin(t * 0.02 + tx) > 0 ? 0 : 1;
+                        pixRect(tx, ty - 3 - fl, 2, 3, "#ffaa00");
+                        pixRect(tx, ty - 4 - fl, 2, 1, "#ffe685");
+                    }
+                    break;
+                }
+                case 'core': {
+                    bctx.globalAlpha = 0.45;
+                    for (const a of bgAsteroids) drawRock(sx(a.x), sy(a.y), a.r, a.seed);
+                    bctx.globalAlpha = 1.0;
+                    drawSun("#ffffff", "#ff6e2a", "#d82a0a");
+                    break;
+                }
+                case 'bday': {
+                    // bg balloons
+                    bctx.globalAlpha = 0.3;
+                    const bcols = ['#ff5a8c', '#5ce1e6', '#ffd23a', '#9cff5a'];
+                    for (let i = 0; i < 4; i++) {
+                        const bx = 18 + i * 30 + Math.sin(t * 0.0008 + i * 2) * 5;
+                        const by = 120 + ((t * 0.01 + i * 50) % 160);
+                        bctx.fillStyle = bcols[i];
+                        bctx.beginPath(); bctx.arc(bx, BUFFER_H - by, 5, 0, Math.PI * 2); bctx.fill();
+                    }
+                    bctx.globalAlpha = 1.0;
+                    drawCakeSun(t);
+                    // bunting
+                    const bunt = ['#ff5a8c', '#ffd23a', '#5ce1e6', '#9cff5a', '#c98cff'];
+                    for (let i = 0; i < 13; i++) {
+                        const bx = i * 10 + 2;
+                        const by = 46 + Math.abs(6 - i);
+                        bctx.fillStyle = bunt[i % 5];
+                        bctx.beginPath();
+                        bctx.moveTo(bx, by); bctx.lineTo(bx + 6, by); bctx.lineTo(bx + 3, by + 5);
+                        bctx.closePath(); bctx.fill();
+                    }
+                    bctx.fillStyle = "#fff"; bctx.font = "6px monospace"; bctx.textAlign = "center";
+                    bctx.fillText("HAPPY BIRTHDAY!", BUFFER_W / 2, 58);
+                    break;
+                }
+            }
+        }
+
+        // ---------------------------------------------------------
+        // ENTITY SPRITES
+        function drawHazard(h, t) {
+            const x = sx(h.x), y = sy(h.y);
+            switch (h.type) {
+                case 'gull': case 'pigeon': case 'vulture': {
+                    const body = h.type === 'vulture' ? "#4a3520" : (h.type === 'pigeon' ? "#8a90a0" : "#e8e8e8");
+                    const flap = Math.sin(t * 0.015 + h.phase) > 0;
+                    pixRect(x + 2, y + 2, 3, 2, body);
+                    pixRect(x + (h.vx > 0 ? 5 : 1), y + 2, 1, 1, "#ffaa00"); // beak
+                    if (flap) { pixRect(x, y, 2, 1, body); pixRect(x + 5, y, 2, 1, body); }
+                    else { pixRect(x, y + 4, 2, 1, body); pixRect(x + 5, y + 4, 2, 1, body); }
+                    break;
+                }
+                case 'tram': {
+                    pixRect(x, y + 1, 14, 5, "#ffd23a");
+                    pixRect(x, y, 14, 1, "#b04a2a");
+                    pixRect(x + 2, y + 2, 2, 2, "#2a3a4a"); pixRect(x + 6, y + 2, 2, 2, "#2a3a4a"); pixRect(x + 10, y + 2, 2, 2, "#2a3a4a");
+                    pixRect(x + 2, y + 6, 2, 1, "#222"); pixRect(x + 10, y + 6, 2, 1, "#222");
+                    pixRect(x + 6, y - 3, 1, 3, "#888");
+                    break;
+                }
+                case 'spout': {
+                    const top = sy(h.topY), w = sx(h.w);
+                    for (let yy = top; yy < BUFFER_H - 12; yy += 2) {
+                        const sway = (Math.sin(t * 0.01 + yy * 0.3) * 1.5) | 0;
+                        pixRect(x + sway + 1, yy, w - 2, 1, "#5ce1e6");
+                        if (yy % 6 === 0) pixRect(x + sway, yy, 1, 1, "#ffffff");
+                    }
+                    pixRect(x - 1, top - 2, w + 2, 3, "#cffcff");
+                    break;
+                }
+                case 'tornado': {
+                    const top = sy(h.topY), w = sx(h.w);
+                    for (let yy = top; yy < BUFFER_H - 8; yy += 2) {
+                        const prog = (yy - top) / (BUFFER_H - top);
+                        const ww = Math.max(2, (w * (0.4 + prog * 0.6)) | 0);
+                        const sway = (Math.sin(t * 0.012 + yy * 0.25) * 2) | 0;
+                        pixRect(x + sway + (w - ww) / 2, yy, ww, 1, yy % 4 === 0 ? "#d2a35a" : "#a87838");
+                    }
+                    break;
+                }
+                case 'umbrella': {
+                    pixRect(x + 1, y, 5, 1, "#2a3a8c");
+                    pixRect(x, y + 1, 7, 2, "#3a4ab0");
+                    pixRect(x + 3, y + 3, 1, 4, "#666");
+                    pixRect(x + 4, y + 6, 1, 1, "#666");
+                    break;
+                }
+                case 'bat': {
+                    const flap = Math.sin(t * 0.02 + h.phase) > 0;
+                    pixRect(x + 2, y + 1, 2, 2, "#3a2450");
+                    pixRect(x + 2, y, 1, 1, "#ff2a1f"); // eye glint
+                    if (flap) { pixRect(x, y, 2, 2, "#5a3a78"); pixRect(x + 4, y, 2, 2, "#5a3a78"); }
+                    else { pixRect(x, y + 2, 2, 2, "#5a3a78"); pixRect(x + 4, y + 2, 2, 2, "#5a3a78"); }
+                    break;
+                }
+                case 'stalactite': {
+                    const shakeX = h.state === 'hang' && h.timer < 400 ? ((t / 40) % 2 === 0 ? 1 : -1) : 0;
+                    pixRect(x + shakeX, y, 4, 2, "#9a8fa8");
+                    pixRect(x + 1 + shakeX, y + 2, 2, 2, "#7a7088");
+                    pixRect(x + 1 + shakeX, y + 4, 1, 2, "#5a5468");
+                    break;
+                }
+                case 'balloon': {
+                    const col = ['#ff5a8c', '#5ce1e6', '#ffd23a'][(h.phase * 10 | 0) % 3];
+                    bctx.fillStyle = col;
+                    bctx.beginPath(); bctx.arc(x + 2, y + 2, 3, 0, Math.PI * 2); bctx.fill();
+                    pixRect(x + 1, y + 1, 1, 1, "#ffffff");
+                    pixRect(x + 2, y + 5, 1, 3, "#aaa");
+                    break;
+                }
+                case 'gift': {
+                    pixRect(x, y + 1, 5, 4, "#d8344a");
+                    pixRect(x + 2, y, 1, 5, "#ffd23a");
+                    pixRect(x, y + 2, 5, 1, "#ffd23a");
+                    pixRect(x + 1, y - 1, 1, 1, "#ffd23a"); pixRect(x + 3, y - 1, 1, 1, "#ffd23a");
+                    break;
+                }
+            }
+        }
+
+        function drawPickup(p, t) {
+            const x = sx(p.x), y = sy(p.y);
+            const bob = Math.sin(t * 0.008 + p.x) > 0 ? 0 : 1;
+            switch (p.type) {
+                case 'shield':
+                    pixRect(x, y + bob, 5, 4, "#1a4a6e");
+                    pixRect(x + 1, y + 1 + bob, 3, 3, "#5ce1e6");
+                    break;
+                case 'triple':
+                    pixRect(x + 2, y + bob, 1, 4, "#ffd23a");
+                    pixRect(x, y + 1 + bob, 1, 3, "#ffd23a");
+                    pixRect(x + 4, y + 1 + bob, 1, 3, "#ffd23a");
+                    break;
+                case 'heart':
+                    drawPixelHeart(x, y + bob);
+                    break;
+                case 'tart':
+                    pixRect(x, y + 1 + bob, 5, 2, "#d8a850");
+                    pixRect(x + 1, y + bob, 3, 2, "#ffe685");
+                    break;
+                case 'cake':
+                    pixRect(x, y + 2 + bob, 5, 2, "#a8552e");
+                    pixRect(x + 1, y + bob, 3, 2, "#e88aa8");
+                    pixRect(x + 2, y - 1 + bob, 1, 1, "#ffd23a");
+                    break;
+            }
+        }
+
+        function drawBoss(t) {
+            const x = sx(boss.x), y = sy(boss.y);
+            const flap = Math.sin(t * 0.01) > 0 ? -1 : 1;
+            // wings
+            for (let i = 0; i < 4; i++) {
+                const c = ['#d82a0a', '#ff6e2a', '#ffb23a', '#ffe685'][i];
+                pixRect(x - i * 2, y + 4 + i * flap, 6, 2, c);
+                pixRect(x + 18 + i * 2, y + 4 + i * flap, 6, 2, c);
+            }
+            // body
+            pixRect(x + 8, y + 2, 8, 8, "#8c1a0a");
+            pixRect(x + 10, y, 4, 3, "#d82a0a");
+            pixRect(x + 10, y + 1, 1, 1, "#ffe685"); pixRect(x + 13, y + 1, 1, 1, "#ffe685"); // eyes
+            pixRect(x + 9, y + 10, 6, 2, "#ff6e2a"); // tail
+            // hp bar
+            pixRect(34, 36, 60, 4, "#1a0505");
+            pixRect(35, 37, (58 * boss.hp / boss.maxHp) | 0, 2, "#ff4b1a");
+        }
+
+        // ---------------------------------------------------------
+        // DRAW
+        function draw() {
+            const th = theme();
+            const t = Date.now();
+            bctx.clearRect(0, 0, BUFFER_W, BUFFER_H);
+
+            bctx.save();
+            if (shakeT > 0 && shakeMag > 0) {
+                bctx.translate((Math.random() * shakeMag * 2 - shakeMag) | 0, (Math.random() * shakeMag * 2 - shakeMag) | 0);
+            }
+
+            drawThemeBg(th, t);
+
+            // Lightning
+            if (lightningBolt && lightningBolt.active) {
+                bctx.strokeStyle = "#ffb23a"; bctx.lineWidth = 2;
+                bctx.beginPath();
+                bctx.moveTo(sx(lightningBolt.points[0].x), sy(lightningBolt.points[0].y));
+                lightningBolt.points.forEach(pt => bctx.lineTo(sx(pt.x), sy(pt.y)));
+                bctx.stroke();
+                bctx.strokeStyle = "#ffffff"; bctx.lineWidth = 1; bctx.stroke();
+            } else if (lightningBolt && !lightningBolt.active) {
+                // warning marker
+                if ((t / 150 | 0) % 2 === 0) {
+                    bctx.fillStyle = "#ffb23a"; bctx.font = "7px monospace"; bctx.textAlign = "center";
+                    bctx.fillText("!", sx(lightningBolt.targetX), 40);
+                }
+            }
+
+            // Fireballs
+            for (const f of fireballs) {
+                const x = sx(f.x), y = sy(f.y);
+                for (let i = 0; i < 4; i++) {
+                    const ty = y - i * 4 - 1;
+                    if (ty < 0) continue;
+                    pixRect(x + 3 + (Math.sin(t * 0.02 + i) * 1.5) | 0, ty, 1, 1, (i % 2 === 0) ? "#ff4b1a" : "#ffb23a");
+                }
+                pixRect(x + 2, y + 2, 4, 5, "#ff3b00");
+                pixRect(x + 2, y + 4, 4, 3, "#ff8c00");
+                pixRect(x + 3, y + 5, 2, 2, "#ffea00");
+                pixRect(x + 3, y + 1, 2, 1, "#ff3b00");
+            }
+
+            // Asteroids
+            for (const a of fallingAsteroids) {
+                const ax = sx(a.x), ay = sy(a.y), r = a.w / 4;
+                if (a.flaming) {
+                    for (let i = 0; i < 5; i++) {
+                        const ty = ay - i * 4 - 2;
+                        if (ty < 0) continue;
+                        pixRect(ax + r + (Math.sin(t * 0.03 + i) * 2.0) | 0, ty, 2, 2, (i % 2 === 0) ? "#ff3b00" : "#ffaa00");
+                    }
+                }
+                drawRock(ax + r, ay + r, r, a.seed, a.hp / a.maxHp);
+            }
+
+            for (const h of hazards) drawHazard(h, t);
+            for (const p of pickups) drawPickup(p, t);
+            if (boss) drawBoss(t);
+
+            for (const p of projectiles) pixRect(sx(p.x), sy(p.y), 1, 3, "#ffffff");
+
+            for (const pt of playerTrail) {
+                const alpha = pt.life / pt.maxLife;
+                bctx.fillStyle = `rgba(92, 225, 230, ${alpha * 0.65})`;
+                bctx.fillRect(sx(pt.x), sy(pt.y), 1, 2);
+            }
+
+            // Player
+            if (gameState !== 'GAMEOVER' && !(player.invuln > 0 && (player.invuln % 200) < 100)) {
+                const px = sx(player.x), py = sy(player.y);
+                const flap = Math.sin(t * 0.018) > 0;
+                if (player.shield) {
+                    bctx.globalAlpha = 0.4 + Math.sin(t * 0.01) * 0.15;
+                    bctx.strokeStyle = "#5ce1e6"; bctx.lineWidth = 1;
+                    bctx.beginPath(); bctx.arc(px + 4, py + 4, 7, 0, Math.PI * 2); bctx.stroke();
+                    bctx.globalAlpha = 1.0;
+                }
+                pixRect(px + 3, py + 3, 2, 3, "#b87000");
+                pixRect(px + 3, py + 1, 2, 2, "#ffe685");
+                pixRect(px + 2, py + 6, 1, 2, "#704000");
+                pixRect(px + 5, py + 6, 1, 2, "#704000");
+                if (flap) {
+                    pixRect(px - 1, py + 1, 4, 1, "#ffe685"); pixRect(px - 2, py + 2, 3, 1, "#ffb23a"); pixRect(px - 1, py + 3, 2, 1, "#ff7a24");
+                    pixRect(px + 5, py + 1, 4, 1, "#ffe685"); pixRect(px + 7, py + 2, 3, 1, "#ffb23a"); pixRect(px + 7, py + 3, 2, 1, "#ff7a24");
+                } else {
+                    pixRect(px - 1, py + 3, 4, 1, "#ff7a24"); pixRect(px - 2, py + 2, 3, 1, "#ffb23a"); pixRect(px - 1, py + 1, 2, 1, "#ffe685");
+                    pixRect(px + 5, py + 3, 4, 1, "#ff7a24"); pixRect(px + 7, py + 2, 3, 1, "#ffb23a"); pixRect(px + 7, py + 1, 2, 1, "#ffe685");
+                }
+            }
+
+            // Particles
+            for (const p of particles) pixRect(sx(p.x), sy(p.y), p.size, p.size, p.color);
+
+            // Rain (foreground)
+            if (th.rain) {
+                bctx.fillStyle = "rgba(170,200,230,0.5)";
+                for (const r of rain) bctx.fillRect(sx(r.x), sy(r.y), 1, 3);
+            }
+
+            // Dungeon darkness
+            if (th.dark && gameState === 'PLAYING') {
+                const cx = sx(player.x + 8), cy = sy(player.y + 8);
+                const g = bctx.createRadialGradient(cx, cy, 14, cx, cy, 55);
+                g.addColorStop(0, "rgba(0,0,0,0)");
+                g.addColorStop(0.7, "rgba(0,0,0,0.7)");
+                g.addColorStop(1, "rgba(0,0,0,0.93)");
+                bctx.fillStyle = g;
+                bctx.fillRect(-4, -4, BUFFER_W + 8, BUFFER_H + 8);
+            }
+
+            // Sandstorm tint
+            if (th.sandstorm && wind !== 0) {
+                bctx.globalAlpha = 0.18;
+                pixRect(0, 0, BUFFER_W, BUFFER_H, "#d2a35a");
+                bctx.globalAlpha = 1.0;
+                bctx.fillStyle = "rgba(255,240,200,0.4)";
+                for (let i = 0; i < 14; i++) {
+                    bctx.fillRect(((t * 0.3 + i * 37) % (BUFFER_W + 20)) - 10, (i * 47) % BUFFER_H, 3, 1);
+                }
+            }
+
+            bctx.restore();
+
+            // Score popups
+            bctx.font = "6px monospace"; bctx.textAlign = "center";
+            for (const p of popups) {
+                bctx.globalAlpha = Math.min(1, p.life / 400);
+                bctx.fillStyle = "#ffe685";
+                bctx.fillText(p.txt, sx(p.x) + 4, sy(p.y));
+            }
+            bctx.globalAlpha = 1.0;
+
+            // HUD
+            bctx.fillStyle = "#ffffff"; bctx.textAlign = "left"; bctx.font = "7px monospace";
+            bctx.fillText("ICARUS INC.", 6, 10);
+            bctx.fillStyle = "#ffdb57";
+            bctx.fillText(`HIGH SCORE ${highScore}`, 6, 20);
+            bctx.fillStyle = "#ffffff";
+            bctx.fillText(`SCORE ${score}`, 6, 30);
+            bctx.fillStyle = "#aaa";
+            bctx.fillText("HEALTH", 6, 40);
+            for (let i = 0; i < player.hp; i++) drawPixelHeart(44 + i * 7, 36);
+            bctx.fillStyle = "#9cf"; bctx.textAlign = "right";
+            bctx.fillText(birthdayMode ? "BONUS" : `LV ${level}`, BUFFER_W - 6, 10);
+            if (player.tripleT > 0) { bctx.fillStyle = "#ffd23a"; bctx.fillText("TRIPLE", BUFFER_W - 6, 20); }
+            if (combo >= 2 && gameState === 'PLAYING') {
+                bctx.textAlign = "center"; bctx.fillStyle = "#ff5a8c"; bctx.font = "7px monospace";
+                bctx.fillText(`COMBO x${Math.min(combo, 5)}`, BUFFER_W / 2, 52);
+            }
+
+            // Level intro banner
+            if (levelIntro > 0 && gameState === 'PLAYING') {
+                bctx.globalAlpha = Math.min(1, levelIntro / 500);
+                bctx.fillStyle = "rgba(0,0,0,0.7)";
+                bctx.fillRect(0, 96, BUFFER_W, 28);
+                bctx.fillStyle = "#fff"; bctx.textAlign = "center"; bctx.font = "8px monospace";
+                bctx.fillText(theme().name, BUFFER_W / 2, 108);
+                bctx.fillStyle = "#ffb23a"; bctx.font = "6px monospace";
+                bctx.fillText(theme().sub, BUFFER_W / 2, 118);
+                bctx.globalAlpha = 1.0;
+            }
+
+            // Overlays
+            if (gameState === 'START') {
+                const lines = ["ARROWS MOVE  SPACE SHOOT", "Z DASH    ENTER TO BEGIN"];
+                if (bdayUnlocked) lines.push("PRESS B: BIRTHDAY BASH");
+                drawOverlay("ICARUS INC.", lines);
+            }
+            if (gameState === 'GAMEOVER') drawOverlay("STRUCK DOWN", [`SCORE: ${score}`, "ENTER TO RESTART"]);
+            if (gameState === 'WIN') {
+                if (birthdayMode) drawOverlay("HAPPY BIRTHDAY!", ["FROM ICARUS INC.", `BONUS SCORE: ${score}`, "ENTER FOR TITLE"]);
+                else if (level < MAX_LEVEL) {
+                    const lines = [theme().name + " CLEARED", "ENTER FOR NEXT LEVEL"];
+                    if (bdayUnlocked && level === 2) lines.push("SECRET LEVEL UNLOCKED!");
+                    drawOverlay(`LEVEL ${level} COMPLETE`, lines);
+                }
+                else drawOverlay("ASCENDED", ["YOU ARE THE NEW SUN", "ENTER TO PLAY AGAIN"]);
+            }
+
+            drawScanlines();
+            drawVignette();
+
+            ctx.clearRect(0, 0, WIDTH, HEIGHT);
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(buffer, 0, 0, WIDTH, HEIGHT);
+        }
+
+        // ---------------------------------------------------------
+        function loop(t) {
+            update(t - lastTime);
+            draw();
+            lastTime = t;
+            requestAnimationFrame(loop);
+        }
+        requestAnimationFrame(loop);
+    </script>
+</body>
+
+</html>
