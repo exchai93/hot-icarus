@@ -769,16 +769,20 @@
         }
 
         function drawSpeaker(x, y, isMuted) {
-            const c = isMuted ? "#888" : "#ffdb57";
-            pixRect(x, y + 2, 1, 3, c);          // box
-            pixRect(x + 1, y + 1, 2, 5, c);      // cone
-            if (isMuted) {                       // X
-                pixRect(x + 4, y + 1, 1, 1, "#ff5a5a"); pixRect(x + 6, y + 1, 1, 1, "#ff5a5a");
-                pixRect(x + 5, y + 2, 1, 1, "#ff5a5a");
-                pixRect(x + 4, y + 3, 1, 1, "#ff5a5a"); pixRect(x + 6, y + 3, 1, 1, "#ff5a5a");
+            // dark rounded chip so the icon is visible over any background
+            pixRect(x - 2, y - 1, 13, 9, "rgba(0,0,0,0.55)");
+            const c = isMuted ? "#bbb" : "#ffdb57";
+            pixRect(x, y + 2, 2, 3, c);          // speaker box
+            pixRect(x + 2, y + 1, 2, 5, c);      // cone top/bottom
+            pixRect(x + 2, y, 1, 7, c);
+            if (isMuted) {                       // red X
+                pixRect(x + 5, y + 1, 1, 1, "#ff5a5a"); pixRect(x + 8, y + 1, 1, 1, "#ff5a5a");
+                pixRect(x + 6, y + 2, 1, 1, "#ff5a5a"); pixRect(x + 7, y + 2, 1, 1, "#ff5a5a");
+                pixRect(x + 6, y + 4, 1, 1, "#ff5a5a"); pixRect(x + 7, y + 4, 1, 1, "#ff5a5a");
+                pixRect(x + 5, y + 5, 1, 1, "#ff5a5a"); pixRect(x + 8, y + 5, 1, 1, "#ff5a5a");
             } else {                             // sound waves
-                pixRect(x + 4, y + 2, 1, 3, c);
-                pixRect(x + 5, y + 1, 1, 5, c);
+                pixRect(x + 5, y + 2, 1, 3, c);
+                pixRect(x + 7, y + 1, 1, 5, c);
             }
         }
 
@@ -1344,10 +1348,10 @@
             bctx.fillStyle = "#aaa";
             bctx.fillText("HEALTH", 6, 40);
             for (let i = 0; i < player.hp; i++) drawPixelHeart(44 + i * 7, 36);
+            drawSpeaker(BUFFER_W - 13, 3, muted);
             bctx.fillStyle = "#9cf"; bctx.textAlign = "right";
-            bctx.fillText(birthdayMode ? "BONUS" : `LV ${level}`, BUFFER_W - 12, 10);
-            if (player.tripleT > 0) { bctx.fillStyle = "#ffd23a"; bctx.fillText("TRIPLE", BUFFER_W - 6, 20); }
-            drawSpeaker(BUFFER_W - 9, 4, muted);
+            bctx.fillText(birthdayMode ? "BONUS" : `LV ${level}`, BUFFER_W - 6, 20);
+            if (player.tripleT > 0) { bctx.fillStyle = "#ffd23a"; bctx.fillText("TRIPLE", BUFFER_W - 6, 30); }
             if (combo >= 2 && gameState === 'PLAYING') {
                 bctx.textAlign = "center"; bctx.fillStyle = "#ff5a8c"; bctx.font = "7px monospace";
                 bctx.fillText(`COMBO x${Math.min(combo, 5)}`, BUFFER_W / 2, 52);
