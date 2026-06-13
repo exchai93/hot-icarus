@@ -135,9 +135,54 @@
 
         function theme() { return birthdayMode ? BDAY : THEMES[Math.min(level - 1, THEMES.length - 1)]; }
 
+        // ---------------------------------------------------------
+        // AUDIO — procedural Web Audio blips, zero asset files.
+        // Created lazily on first user gesture (mobile autoplay rules).
+        let audioCtx = null;
+        let muted = localStorage.getItem('icarusMuted') === '1';
+        function initAudio() {
+            if (audioCtx) return;
+            try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
+        }
+        function tone(freq, dur, type, vol, slideTo) {
+            if (muted || !audioCtx) return;
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type || 'square';
+            osc.frequency.setValueAtTime(freq, now);
+            if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, now + dur);
+            gain.gain.setValueAtTime((vol || 0.2), now);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(now); osc.stop(now + dur);
+        }
+        function melody(notes, type, vol) {
+            if (muted || !audioCtx) return;
+            let t0 = 0;
+            for (const [f, d] of notes) { setTimeout(() => tone(f, d, type, vol), t0 * 1000); t0 += d; }
+        }
+        const sfx = {
+            shoot: () => tone(660, 0.08, 'square', 0.12, 880),
+            hit: () => tone(200, 0.25, 'sawtooth', 0.25, 80),
+            pickup: () => tone(880, 0.12, 'sine', 0.2, 1320),
+            explode: () => tone(140, 0.2, 'sawtooth', 0.2, 50),
+            combo: () => tone(990, 0.1, 'triangle', 0.18, 1480),
+            win: () => melody([[523, 0.12], [659, 0.12], [784, 0.12], [1047, 0.24]], 'triangle', 0.22),
+            over: () => melody([[392, 0.18], [330, 0.18], [262, 0.32]], 'sawtooth', 0.22),
+            bday: () => melody([[392, 0.2], [392, 0.15], [440, 0.3], [392, 0.3], [523, 0.3], [494, 0.5]], 'triangle', 0.22),
+        };
+        function toggleMute() {
+            muted = !muted;
+            localStorage.setItem('icarusMuted', muted ? '1' : '0');
+            if (!muted) { initAudio(); sfx.pickup(); }
+        }
+
         const keys = {};
         window.addEventListener('keydown', e => {
             keys[e.code] = true;
+            initAudio();
+            if (e.code === 'KeyM') { toggleMute(); return; }
             if (gameState !== 'PLAYING') {
                 if (e.code === 'KeyB' && bdayUnlocked && gameState === 'START') {
                     birthdayMode = true; resetGame(true);
@@ -167,7 +212,17 @@
         }
         let lastTap = 0;
         const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        // Top-right corner (in buffer space) toggles mute on touch devices.
+        function tappedMute(e) {
+            const r = canvas.getBoundingClientRect();
+            const t = e.changedTouches[0] || e.touches[0];
+            if (!t) return false;
+            const fx = (t.clientX - r.left) / r.width, fy = (t.clientY - r.top) / r.height;
+            return fx > 0.82 && fy < 0.06;
+        }
         canvas.addEventListener('touchstart', e => {
+            initAudio();
+            if (tappedMute(e)) { e.preventDefault(); toggleMute(); return; }
             if (gameState !== 'PLAYING') { e.preventDefault(); resetGame(false); return; }
             const now = Date.now();
             if (now - lastTap < 300) keys['KeyZ'] = true; // double-tap = dash
@@ -230,6 +285,7 @@
             const pts = base * mult;
             score += pts;
             popups.push({ x, y, txt: '+' + pts + (mult > 1 ? ' x' + mult : ''), life: 800 });
+            if (mult > 1) sfx.combo(); else sfx.explode();
         }
 
         function maybeDropPickup(x, y) {
@@ -251,9 +307,11 @@
             spawnExplosion(fx, fy, color, 12);
             shake(3, 300);
             combo = 0;
+            sfx.hit();
             if (player.hp <= 0) {
                 gameState = 'GAMEOVER';
                 shake(5, 500);
+                sfx.over();
                 if (score > highScore) { highScore = score; localStorage.setItem('icarusHighScore', String(highScore)); }
             }
         }
@@ -283,6 +341,7 @@
 
         function winLevel() {
             gameState = 'WIN';
+            if (birthdayMode) sfx.bday(); else sfx.win();
             if (!birthdayMode && level >= 2 && !bdayUnlocked) {
                 bdayUnlocked = true;
                 localStorage.setItem('icarusBdayUnlock', '1');
@@ -424,6 +483,7 @@
                     projectiles.push({ x: player.x + 3, y: player.y - 2, w: 2, h: 6, vx: -0.8 });
                     projectiles.push({ x: player.x + 11, y: player.y - 2, w: 2, h: 6, vx: 0.8 });
                 }
+                sfx.shoot();
                 player.shootCooldown = 250;
             }
             if (player.invuln > 0) player.invuln -= dt;
@@ -662,6 +722,7 @@
                         case 'cake': addScore(100, p.x, p.y); spawnConfetti(p.x + 5, p.y + 5, 12); break;
                     }
                     spawnExplosion(p.x + 5, p.y + 5, "#5ce1e6", 6);
+                    sfx.pickup();
                     pickups.splice(i, 1);
                 }
             }
@@ -705,6 +766,20 @@
             pixRect(x + 1, y, 1, 1, "#ff2a1f"); pixRect(x + 3, y, 1, 1, "#ff2a1f");
             pixRect(x, y + 1, 5, 1, "#ff2a1f"); pixRect(x + 1, y + 2, 3, 1, "#ff2a1f");
             pixRect(x + 2, y + 3, 1, 1, "#ff2a1f");
+        }
+
+        function drawSpeaker(x, y, isMuted) {
+            const c = isMuted ? "#888" : "#ffdb57";
+            pixRect(x, y + 2, 1, 3, c);          // box
+            pixRect(x + 1, y + 1, 2, 5, c);      // cone
+            if (isMuted) {                       // X
+                pixRect(x + 4, y + 1, 1, 1, "#ff5a5a"); pixRect(x + 6, y + 1, 1, 1, "#ff5a5a");
+                pixRect(x + 5, y + 2, 1, 1, "#ff5a5a");
+                pixRect(x + 4, y + 3, 1, 1, "#ff5a5a"); pixRect(x + 6, y + 3, 1, 1, "#ff5a5a");
+            } else {                             // sound waves
+                pixRect(x + 4, y + 2, 1, 3, c);
+                pixRect(x + 5, y + 1, 1, 5, c);
+            }
         }
 
         function drawOverlay(t, lines) {
@@ -784,8 +859,12 @@
             }
         }
 
-        function drawPhoenix(t) {
+        function drawPhoenix(t, themeId) {
             const wy = 19 + Math.sin(t * 0.0015) * 1.5;
+            // On sunless scenes the phoenix reads as a faint ghostly silhouette
+            // so it stays present without fighting the foreground art.
+            const faint = themeId === 'dungeon' || themeId === 'london' || themeId === 'bday';
+            if (faint) bctx.globalAlpha = 0.4;
             const rows = [
                 [58, 0, 4, "#9e5f00"], [52, -1, 6, "#b87000"], [46, -3, 6, "#cf8100"],
                 [38, -5, 8, "#e69c24"], [30, -7, 8, "#fcd256"], [20, -9, 10, "#fff39c"], [12, -11, 8, "#ffffff"]
@@ -799,6 +878,7 @@
             pixRect(63, wy - 5, 2, 2, "#8f5300");
             pixRect(62, wy - 3, 4, 8, "#704000");
             pixRect(63, wy + 5, 2, 6, "#b87000");
+            bctx.globalAlpha = 1.0;
         }
 
         // ---------------------------------------------------------
@@ -979,6 +1059,10 @@
                     break;
                 }
             }
+
+            // The golden phoenix watches over every level (its halo tints to
+            // suit the scene — pale & ghostly in the dungeon, fiery at the core).
+            if (th.id !== 'ascent') drawPhoenix(t, th.id);
         }
 
         // ---------------------------------------------------------
@@ -1244,7 +1328,13 @@
             }
             bctx.globalAlpha = 1.0;
 
-            // HUD
+            // HUD — dark gradient strip keeps text legible over any theme
+            const hudG = bctx.createLinearGradient(0, 0, 0, 46);
+            hudG.addColorStop(0, "rgba(0,0,0,0.55)");
+            hudG.addColorStop(1, "rgba(0,0,0,0)");
+            bctx.fillStyle = hudG;
+            bctx.fillRect(0, 0, BUFFER_W, 46);
+
             bctx.fillStyle = "#ffffff"; bctx.textAlign = "left"; bctx.font = "7px monospace";
             bctx.fillText("ICARUS INC.", 6, 10);
             bctx.fillStyle = "#ffdb57";
@@ -1255,8 +1345,9 @@
             bctx.fillText("HEALTH", 6, 40);
             for (let i = 0; i < player.hp; i++) drawPixelHeart(44 + i * 7, 36);
             bctx.fillStyle = "#9cf"; bctx.textAlign = "right";
-            bctx.fillText(birthdayMode ? "BONUS" : `LV ${level}`, BUFFER_W - 6, 10);
+            bctx.fillText(birthdayMode ? "BONUS" : `LV ${level}`, BUFFER_W - 12, 10);
             if (player.tripleT > 0) { bctx.fillStyle = "#ffd23a"; bctx.fillText("TRIPLE", BUFFER_W - 6, 20); }
+            drawSpeaker(BUFFER_W - 9, 4, muted);
             if (combo >= 2 && gameState === 'PLAYING') {
                 bctx.textAlign = "center"; bctx.fillStyle = "#ff5a8c"; bctx.font = "7px monospace";
                 bctx.fillText(`COMBO x${Math.min(combo, 5)}`, BUFFER_W / 2, 52);
